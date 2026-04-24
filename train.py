@@ -1,4 +1,6 @@
 import os
+import glob
+import argparse
 import torch
 from torch.utils.data import DataLoader
 from dataclasses import dataclass
@@ -43,6 +45,23 @@ def get_optimiser(model, cfg):
         raise ValueError(f"Unknown optimiser: {cfg.optimiser}")
 
 
+def find_latest_checkpoint(checkpoint_dir, optimiser):
+    pattern = os.path.join(checkpoint_dir, f"{optimiser}_step*.pt")
+    candidates = glob.glob(pattern)
+    if not candidates:
+        return None
+    # Extract step number from filename and return the highest
+    return max(candidates, key=lambda p: int(p.split("step")[-1].replace(".pt", "")))
+
+
+def load_checkpoint(path, model, optimiser):
+    print(f"Resuming from {path}")
+    ckpt = torch.load(path, weights_only=False)
+    model.load_state_dict(ckpt["model"])
+    optimiser.load_state_dict(ckpt["optimiser"])
+    return ckpt["step"] + 1  # resume from the step after the saved one
+
+
 @torch.no_grad()
 def evaluate(model, val_loader, eval_steps, device):
     model.eval()
@@ -58,7 +77,7 @@ def evaluate(model, val_loader, eval_steps, device):
     return sum(losses) / len(losses)
 
 
-def train(model_cfg=None, train_cfg=None):
+def train(model_cfg=None, train_cfg=None, fresh=False):
     model_cfg = model_cfg or ModelConfig()
     train_cfg = train_cfg or TrainConfig()
 
@@ -79,18 +98,27 @@ def train(model_cfg=None, train_cfg=None):
     # Model & optimiser
     model = GPT(model_cfg).to(device)
     optimiser = get_optimiser(model, train_cfg)
-
     os.makedirs(train_cfg.checkpoint_dir, exist_ok=True)
 
-    print(f"Parameters: {model.num_params():,}")
+    # Resume from latest checkpoint unless --fresh was requested
+    step = 0
+    if not fresh:
+        ckpt_path = find_latest_checkpoint(train_cfg.checkpoint_dir, train_cfg.optimiser)
+        if ckpt_path:
+            step = load_checkpoint(ckpt_path, model, optimiser)
+        else:
+            print("No checkpoint found — starting from scratch.")
+    else:
+        print("--fresh specified — starting from scratch.")
+
+    print(f"Parameters  : {model.num_params():,}")
     print(f"Train tokens: {len(train_ds):,} samples")
+    print(f"Starting at : step {step}")
     print("-" * 60)
 
-    step = 0
     loader_iter = iter(train_loader)
 
     while step < train_cfg.max_steps:
-        # Refill iterator when exhausted (end of epoch)
         try:
             x, y = next(loader_iter)
         except StopIteration:
@@ -99,12 +127,9 @@ def train(model_cfg=None, train_cfg=None):
 
         x, y = x.to(device), y.to(device)
 
-        # Forward — autocast reduces logits from FP32 to BF16 (6.6GB → 3.3GB)
-        # and routes all matmuls through BF16 tensor cores (~3x faster)
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             _, loss = model(x, y)
 
-        # Backward
         optimiser.zero_grad()
         loss.backward()
         optimiser.step()
@@ -116,7 +141,6 @@ def train(model_cfg=None, train_cfg=None):
             val_loss = evaluate(model, val_loader, train_cfg.eval_steps, device)
             print(f"{'':>8} | val loss   {val_loss:.4f}  ← step {step}")
 
-            # Checkpoint
             path = os.path.join(train_cfg.checkpoint_dir,
                                 f"{train_cfg.optimiser}_step{step}.pt")
             torch.save({
@@ -135,4 +159,8 @@ def train(model_cfg=None, train_cfg=None):
 
 
 if __name__ == "__main__":
-    train()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--fresh", action="store_true",
+                        help="Ignore existing checkpoints and train from scratch")
+    args = parser.parse_args()
+    train(fresh=args.fresh)
