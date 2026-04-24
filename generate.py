@@ -39,14 +39,17 @@ def generate(model, tokenizer, prompt, max_new_tokens, temperature, top_k, devic
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             logits, _ = model(x_cond)
 
-        logits = logits[:, -1, :] / temperature
+        logits = logits[:, -1, :]
 
-        if top_k is not None:
-            top_values, _ = torch.topk(logits, top_k)
-            logits[logits < top_values[:, -1:]] = float('-inf')
-
-        probs = torch.softmax(logits, dim=-1)
-        next_token = torch.multinomial(probs, num_samples=1)
+        if temperature == 0.0:
+            next_token = logits.argmax(dim=-1, keepdim=True)
+        else:
+            logits = logits / temperature
+            if top_k is not None:
+                top_values, _ = torch.topk(logits, top_k)
+                logits[logits < top_values[:, -1:]] = float('-inf')
+            probs = torch.softmax(logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
         x = torch.cat([x, next_token], dim=1)
 
     return tokenizer.decode(x[0].tolist())
