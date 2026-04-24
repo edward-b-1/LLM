@@ -9,11 +9,11 @@ class TokenDataset(Dataset):
         self.context_length = context_length
 
     def __len__(self):
-        # Each sample consumes context_length + 1 tokens (input + target)
-        return len(self.tokens) - self.context_length
+        return (len(self.tokens) - 1) // self.context_length
 
     def __getitem__(self, idx):
-        chunk = self.tokens[idx : idx + self.context_length + 1]
+        start = idx * self.context_length
+        chunk = self.tokens[start : start + self.context_length + 1]
         x = torch.from_numpy(chunk[:-1].astype(np.int64))
         y = torch.from_numpy(chunk[1:].astype(np.int64))
         return x, y
