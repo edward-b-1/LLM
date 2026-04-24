@@ -1,5 +1,6 @@
 import os
 import glob
+import math
 import argparse
 import torch
 from torch.utils.data import DataLoader
@@ -23,6 +24,10 @@ class TrainConfig:
     momentum:     float = 0.9    # only used by sgd-momentum
     weight_decay: float = 0.1    # only used by adamw
 
+    # LR schedule — cosine decay with linear warmup
+    lr_min:       float = 0.0     # final LR at end of cosine decay (0 = decay to zero)
+    warmup_steps: int   = 1_000   # steps to linearly ramp from 0 → lr
+
     # Training
     batch_size: int   = 16
     max_steps:  int   = 100_000
@@ -32,7 +37,7 @@ class TrainConfig:
     log_interval:   int = 10
     eval_interval:  int = 250
     eval_steps:     int = 20
-    save_interval:  int = 0     # save every N steps (0 = only save on eval)
+    save_interval:  int = 10_000  # save every N steps (0 = save on every eval)
     checkpoint_dir: str = "checkpoints"
     run_name:       str = ""   # prefix for checkpoint filenames; defaults to optimizer name
 
@@ -46,6 +51,13 @@ def get_optimizer(model, cfg):
         return torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     else:
         raise ValueError(f"Unknown optimizer: {cfg.optimizer}")
+
+
+def get_lr(step, cfg):
+    if step < cfg.warmup_steps:
+        return cfg.lr * step / max(1, cfg.warmup_steps)
+    progress = (step - cfg.warmup_steps) / max(1, cfg.max_steps - cfg.warmup_steps)
+    return cfg.lr_min + 0.5 * (cfg.lr - cfg.lr_min) * (1 + math.cos(math.pi * progress))
 
 
 def find_latest_checkpoint(checkpoint_dir, optimizer):
@@ -132,6 +144,10 @@ def train(model_cfg=None, train_cfg=None, fresh=False):
 
         x, y = x.to(device), y.to(device)
 
+        lr = get_lr(step, train_cfg)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             _, loss = model(x, y)
 
@@ -142,7 +158,7 @@ def train(model_cfg=None, train_cfg=None, fresh=False):
         optimizer.step()
 
         if step % train_cfg.log_interval == 0:
-            print(f"step {step:5d} | train loss {loss.item():.4f}")
+            print(f"step {step:5d} | train loss {loss.item():.4f}  lr {lr:.2e}")
 
         is_eval_step = step > 0 and step % train_cfg.eval_interval == 0
         is_save_step = train_cfg.save_interval > 0 and step > 0 and step % train_cfg.save_interval == 0
@@ -152,7 +168,8 @@ def train(model_cfg=None, train_cfg=None, fresh=False):
             val_loss = evaluate(model, val_loader, train_cfg.eval_steps, device)
             print(f"{'':>8} | val loss   {val_loss:.4f}  ← step {step}")
 
-        if is_eval_step or is_save_step or is_last_step:
+        should_save = is_last_step or is_save_step
+        if should_save:
             path = os.path.join(train_cfg.checkpoint_dir,
                                 f"{run_name}_step{step}.pt")
             torch.save({
@@ -190,8 +207,12 @@ if __name__ == "__main__":
                         help="Number of training steps (default: from TrainConfig)")
     parser.add_argument("--lr",         type=float, default=None,
                         help="Learning rate (default: from TrainConfig)")
-    parser.add_argument("--grad-clip",  type=float, default=None,
+    parser.add_argument("--grad-clip",    type=float, default=None,
                         help="Gradient clipping max norm, 0 to disable (default: 1.0)")
+    parser.add_argument("--lr-min",       type=float, default=None,
+                        help="Final LR after cosine decay (default: 0.0)")
+    parser.add_argument("--warmup-steps", type=int,   default=None,
+                        help="Linear LR warmup steps (default: 1000)")
     parser.add_argument("--run-name",      type=str,   default=None,
                         help="Checkpoint filename prefix (default: optimizer name)")
     parser.add_argument("--save-interval", type=int,   default=None,
@@ -209,6 +230,10 @@ if __name__ == "__main__":
         train_cfg.lr = args.lr
     if args.grad_clip is not None:
         train_cfg.grad_clip = args.grad_clip
+    if args.lr_min is not None:
+        train_cfg.lr_min = args.lr_min
+    if args.warmup_steps is not None:
+        train_cfg.warmup_steps = args.warmup_steps
     if args.run_name is not None:
         train_cfg.run_name = args.run_name
     if args.save_interval is not None:
