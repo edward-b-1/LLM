@@ -137,7 +137,10 @@ def train(model_cfg=None, train_cfg=None, fresh=False):
         if step % train_cfg.log_interval == 0:
             print(f"step {step:5d} | train loss {loss.item():.4f}")
 
-        if step > 0 and step % train_cfg.eval_interval == 0:
+        is_eval_step = step > 0 and step % train_cfg.eval_interval == 0
+        is_last_step = step == train_cfg.max_steps - 1
+
+        if is_eval_step or is_last_step:
             val_loss = evaluate(model, val_loader, train_cfg.eval_steps, device)
             print(f"{'':>8} | val loss   {val_loss:.4f}  ← step {step}")
 
@@ -160,7 +163,23 @@ def train(model_cfg=None, train_cfg=None, fresh=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--fresh", action="store_true",
+    parser.add_argument("--fresh",     action="store_true",
                         help="Ignore existing checkpoints and train from scratch")
+    parser.add_argument("--optimiser", type=str, default=None,
+                        choices=["sgd", "sgd_momentum", "adamw"],
+                        help="Optimiser to use (default: from TrainConfig)")
+    parser.add_argument("--max-steps", type=int, default=None,
+                        help="Number of training steps (default: from TrainConfig)")
+    parser.add_argument("--lr",        type=float, default=None,
+                        help="Learning rate (default: from TrainConfig)")
     args = parser.parse_args()
-    train(fresh=args.fresh)
+
+    train_cfg = TrainConfig()
+    if args.optimiser is not None:
+        train_cfg.optimiser = args.optimiser
+    if args.max_steps is not None:
+        train_cfg.max_steps = args.max_steps
+    if args.lr is not None:
+        train_cfg.lr = args.lr
+
+    train(train_cfg=train_cfg, fresh=args.fresh)
