@@ -18,14 +18,14 @@ class TrainConfig:
 
     # Optimizer — swap this to experiment
     # Options: "sgd" | "sgd_momentum" | "adamw"
-    optimizer:    str   = "sgd_momentum"
-    lr:           float = 0.1
+    optimizer:    str   = "adamw"
+    lr:           float = 3e-4
     momentum:     float = 0.9    # only used by sgd_momentum
-    weight_decay: float = 0.0    # only used by adamw
+    weight_decay: float = 0.1    # only used by adamw
 
     # Training
-    batch_size: int   = 32
-    max_steps:  int   = 5000
+    batch_size: int   = 16
+    max_steps:  int   = 100_000
     grad_clip:  float = 1.0    # set to 0.0 to disable
 
     # Logging & checkpointing
