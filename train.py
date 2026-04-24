@@ -16,16 +16,17 @@ class TrainConfig:
     train_path: str = "datasets/shakespeare_train.bin"
     val_path:   str = "datasets/shakespeare_val.bin"
 
-    # Optimiser — swap this to experiment
+    # Optimizer — swap this to experiment
     # Options: "sgd" | "sgd_momentum" | "adamw"
-    optimiser: str  = "sgd"
-    lr:        float = 0.1
-    momentum:  float = 0.9    # only used by sgd_momentum
-    weight_decay: float = 0.0 # only used by adamw
+    optimizer:    str   = "sgd_momentum"
+    lr:           float = 0.1
+    momentum:     float = 0.9    # only used by sgd_momentum
+    weight_decay: float = 0.0    # only used by adamw
 
     # Training
-    batch_size: int = 32
-    max_steps:  int = 5000
+    batch_size: int   = 32
+    max_steps:  int   = 5000
+    grad_clip:  float = 1.0    # set to 0.0 to disable
 
     # Logging & checkpointing
     log_interval:  int = 10
@@ -34,32 +35,31 @@ class TrainConfig:
     checkpoint_dir: str = "checkpoints"
 
 
-def get_optimiser(model, cfg):
-    if cfg.optimiser == "sgd":
+def get_optimizer(model, cfg):
+    if cfg.optimizer == "sgd":
         return torch.optim.SGD(model.parameters(), lr=cfg.lr)
-    elif cfg.optimiser == "sgd_momentum":
+    elif cfg.optimizer == "sgd_momentum":
         return torch.optim.SGD(model.parameters(), lr=cfg.lr, momentum=cfg.momentum)
-    elif cfg.optimiser == "adamw":
+    elif cfg.optimizer == "adamw":
         return torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
     else:
-        raise ValueError(f"Unknown optimiser: {cfg.optimiser}")
+        raise ValueError(f"Unknown optimizer: {cfg.optimizer}")
 
 
-def find_latest_checkpoint(checkpoint_dir, optimiser):
-    pattern = os.path.join(checkpoint_dir, f"{optimiser}_step*.pt")
+def find_latest_checkpoint(checkpoint_dir, optimizer):
+    pattern = os.path.join(checkpoint_dir, f"{optimizer}_step*.pt")
     candidates = glob.glob(pattern)
     if not candidates:
         return None
-    # Extract step number from filename and return the highest
     return max(candidates, key=lambda p: int(p.split("step")[-1].replace(".pt", "")))
 
 
-def load_checkpoint(path, model, optimiser):
+def load_checkpoint(path, model, optimizer):
     print(f"Resuming from {path}")
     ckpt = torch.load(path, weights_only=False)
     model.load_state_dict(ckpt["model"])
-    optimiser.load_state_dict(ckpt["optimiser"])
-    return ckpt["step"] + 1  # resume from the step after the saved one
+    optimizer.load_state_dict(ckpt["optimizer"])
+    return ckpt["step"] + 1
 
 
 @torch.no_grad()
@@ -83,7 +83,7 @@ def train(model_cfg=None, train_cfg=None, fresh=False):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device    : {device}")
-    print(f"Optimiser : {train_cfg.optimiser}  lr={train_cfg.lr}")
+    print(f"Optimizer : {train_cfg.optimizer}  lr={train_cfg.lr}")
     print(f"Model     : {model_cfg.n_layers}L  d={model_cfg.d_model}  heads={model_cfg.n_heads}")
 
     # Data
@@ -95,17 +95,17 @@ def train(model_cfg=None, train_cfg=None, fresh=False):
     val_loader   = DataLoader(val_ds,   batch_size=train_cfg.batch_size,
                               shuffle=False, num_workers=2, pin_memory=True)
 
-    # Model & optimiser
+    # Model & optimizer
     model = GPT(model_cfg).to(device)
-    optimiser = get_optimiser(model, train_cfg)
+    optimizer = get_optimizer(model, train_cfg)
     os.makedirs(train_cfg.checkpoint_dir, exist_ok=True)
 
     # Resume from latest checkpoint unless --fresh was requested
     step = 0
     if not fresh:
-        ckpt_path = find_latest_checkpoint(train_cfg.checkpoint_dir, train_cfg.optimiser)
+        ckpt_path = find_latest_checkpoint(train_cfg.checkpoint_dir, train_cfg.optimizer)
         if ckpt_path:
-            step = load_checkpoint(ckpt_path, model, optimiser)
+            step = load_checkpoint(ckpt_path, model, optimizer)
         else:
             print("No checkpoint found — starting from scratch.")
     else:
@@ -130,9 +130,11 @@ def train(model_cfg=None, train_cfg=None, fresh=False):
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             _, loss = model(x, y)
 
-        optimiser.zero_grad()
+        optimizer.zero_grad()
         loss.backward()
-        optimiser.step()
+        if train_cfg.grad_clip > 0.0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
+        optimizer.step()
 
         if step % train_cfg.log_interval == 0:
             print(f"step {step:5d} | train loss {loss.item():.4f}")
@@ -145,13 +147,13 @@ def train(model_cfg=None, train_cfg=None, fresh=False):
             print(f"{'':>8} | val loss   {val_loss:.4f}  ← step {step}")
 
             path = os.path.join(train_cfg.checkpoint_dir,
-                                f"{train_cfg.optimiser}_step{step}.pt")
+                                f"{train_cfg.optimizer}_step{step}.pt")
             torch.save({
-                "step":       step,
-                "model":      model.state_dict(),
-                "optimiser":  optimiser.state_dict(),
-                "train_cfg":  train_cfg,
-                "model_cfg":  model_cfg,
+                "step":      step,
+                "model":     model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "train_cfg": train_cfg,
+                "model_cfg": model_cfg,
             }, path)
             print(f"{'':>8} | saved {path}")
 
@@ -161,25 +163,39 @@ def train(model_cfg=None, train_cfg=None, fresh=False):
     print("Training complete.")
 
 
+DATASETS = {
+    "shakespeare": ("datasets/shakespeare_train.bin", "datasets/shakespeare_val.bin"),
+    "wikipedia":   ("datasets/wikipedia_train.bin",   "datasets/wikipedia_val.bin"),
+}
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--fresh",     action="store_true",
+    parser.add_argument("--fresh",      action="store_true",
                         help="Ignore existing checkpoints and train from scratch")
-    parser.add_argument("--optimiser", type=str, default=None,
+    parser.add_argument("--dataset",    type=str,   default=None,
+                        choices=list(DATASETS.keys()),
+                        help="Dataset to train on (default: shakespeare)")
+    parser.add_argument("--optimizer",  type=str,   default=None,
                         choices=["sgd", "sgd_momentum", "adamw"],
-                        help="Optimiser to use (default: from TrainConfig)")
-    parser.add_argument("--max-steps", type=int, default=None,
+                        help="Optimizer to use (default: from TrainConfig)")
+    parser.add_argument("--max-steps",  type=int,   default=None,
                         help="Number of training steps (default: from TrainConfig)")
-    parser.add_argument("--lr",        type=float, default=None,
+    parser.add_argument("--lr",         type=float, default=None,
                         help="Learning rate (default: from TrainConfig)")
+    parser.add_argument("--grad-clip",  type=float, default=None,
+                        help="Gradient clipping max norm, 0 to disable (default: 1.0)")
     args = parser.parse_args()
 
     train_cfg = TrainConfig()
-    if args.optimiser is not None:
-        train_cfg.optimiser = args.optimiser
+    if args.dataset is not None:
+        train_cfg.train_path, train_cfg.val_path = DATASETS[args.dataset]
+    if args.optimizer is not None:
+        train_cfg.optimizer = args.optimizer
     if args.max_steps is not None:
         train_cfg.max_steps = args.max_steps
     if args.lr is not None:
         train_cfg.lr = args.lr
+    if args.grad_clip is not None:
+        train_cfg.grad_clip = args.grad_clip
 
     train(train_cfg=train_cfg, fresh=args.fresh)
