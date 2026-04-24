@@ -7,9 +7,12 @@ DATASET_DIR = os.path.join(os.path.dirname(DATA_DIR), "datasets")
 os.makedirs(DATASET_DIR, exist_ok=True)
 
 
+TOKENIZER_DIR = os.path.join(os.path.dirname(DATA_DIR), "tokenizer")
+
 def get_tokenizer():
-    tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
-    tokenizer.model_max_length = 1_000_000
+    source = TOKENIZER_DIR if os.path.isdir(TOKENIZER_DIR) else "gpt2"
+    tokenizer = GPT2TokenizerFast.from_pretrained(source)
+    tokenizer.model_max_length = 10_000_000
     return tokenizer
 
 

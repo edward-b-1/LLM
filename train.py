@@ -164,8 +164,9 @@ def train(model_cfg=None, train_cfg=None, fresh=False):
 
 
 DATASETS = {
-    "shakespeare": ("datasets/shakespeare_train.bin", "datasets/shakespeare_val.bin"),
-    "wikipedia":   ("datasets/wikipedia_train.bin",   "datasets/wikipedia_val.bin"),
+    "shakespeare":          ("datasets/shakespeare_train.bin",          "datasets/shakespeare_val.bin"),
+    "shakespeare_complete": ("datasets/shakespeare_complete_train.bin", "datasets/shakespeare_complete_val.bin"),
+    "wikipedia":            ("datasets/wikipedia_train.bin",            "datasets/wikipedia_val.bin"),
 }
 
 if __name__ == "__main__":
