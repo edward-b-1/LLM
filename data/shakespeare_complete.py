@@ -18,10 +18,15 @@ def prepare():
         text = f.read()
 
     # Strip Gutenberg header and footer boilerplate
-    start = text.find("THE COMPLETE WORKS OF WILLIAM SHAKESPEARE")
-    end   = text.rfind("End of the Project Gutenberg")
-    if start != -1:
-        text = text[start:end]
+    START_TEXT_MARK = "*** START OF THE PROJECT GUTENBERG EBOOK 100 ***"
+    END_TEXT_MARK = "*** END OF THE PROJECT GUTENBERG EBOOK 100 ***"
+    start = text.find(START_TEXT_MARK)
+    end   = text.rfind(END_TEXT_MARK)
+    if start == -1:
+        raise ValueError("Could not find expected header marker — check the downloaded file")
+    if end == -1:
+        raise ValueError("Could not find expected footer marker — check the downloaded file")
+    text = text[start + len(START_TEXT_MARK):end].strip()
 
     print(f"Raw text : {len(text):,} characters")
 
