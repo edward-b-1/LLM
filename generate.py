@@ -2,7 +2,7 @@ import argparse
 import glob
 import os
 import torch
-from transformers import GPT2TokenizerFast
+from data.prepare import get_tokenizer
 
 from config import ModelConfig
 from model.gpt import GPT
@@ -59,8 +59,10 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint",     type=str,   default=None,
                         help="Path to a specific checkpoint .pt file")
     parser.add_argument("--optimizer",      type=str,   default=None,
-                        choices=["sgd", "sgd_momentum", "adamw"],
+                        choices=["sgd", "sgd-momentum", "adamw"],
                         help="Load latest checkpoint for this optimizer")
+    parser.add_argument("--run-name",       type=str,   default=None,
+                        help="Load latest checkpoint for this run name")
     parser.add_argument("--max-new-tokens", type=int,   default=200,
                         help="Number of tokens to generate (default: 200)")
     parser.add_argument("--temperature",    type=float, default=0.8,
@@ -74,11 +76,12 @@ if __name__ == "__main__":
     if args.checkpoint:
         ckpt_path = args.checkpoint
     else:
-        ckpt_path = find_latest_checkpoint("checkpoints", args.optimizer)
+        name = args.run_name or args.optimizer
+        ckpt_path = find_latest_checkpoint("checkpoints", name)
 
     print(f"Loading: {ckpt_path}")
     model, model_cfg = load_model(ckpt_path, device)
-    tokenizer = GPT2TokenizerFast.from_pretrained("gpt2")
+    tokenizer = get_tokenizer()
 
     print(f"Model : {model_cfg.n_layers}L  d={model_cfg.d_model}  params={model.num_params():,}")
     print(f"Temp  : {args.temperature}  Top-k: {args.top_k}")
