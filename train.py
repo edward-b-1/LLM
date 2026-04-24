@@ -118,7 +118,7 @@ def train(model_cfg=None, train_cfg=None, fresh=False):
     os.makedirs(train_cfg.checkpoint_dir, exist_ok=True)
 
     # Resume from latest checkpoint unless --fresh was requested
-    step = 0
+    step = 1
     if not fresh:
         ckpt_path = find_latest_checkpoint(train_cfg.checkpoint_dir, run_name)
         if ckpt_path:
@@ -135,7 +135,7 @@ def train(model_cfg=None, train_cfg=None, fresh=False):
 
     loader_iter = iter(train_loader)
 
-    while step < train_cfg.max_steps:
+    while step <= train_cfg.max_steps:
         try:
             x, y = next(loader_iter)
         except StopIteration:
@@ -160,9 +160,9 @@ def train(model_cfg=None, train_cfg=None, fresh=False):
         if step % train_cfg.log_interval == 0:
             print(f"step {step:5d} | train loss {loss.item():.4f}  lr {lr:.2e}")
 
-        is_eval_step = step > 0 and step % train_cfg.eval_interval == 0
-        is_save_step = train_cfg.save_interval > 0 and step > 0 and step % train_cfg.save_interval == 0
-        is_last_step = step == train_cfg.max_steps - 1
+        is_eval_step = step % train_cfg.eval_interval == 0
+        is_save_step = train_cfg.save_interval > 0 and step % train_cfg.save_interval == 0
+        is_last_step = step == train_cfg.max_steps
 
         if is_eval_step or is_last_step:
             val_loss = evaluate(model, val_loader, train_cfg.eval_steps, device)
