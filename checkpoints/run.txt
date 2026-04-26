@@ -1,0 +1,1 @@
+python generate.py --checkpoint checkpoints/adamw-wikipedia-gpt2s_step150000-sft-squad_step10000.pt --prompt "Question: What country is Aberdeen in?\nAnswer:" --temperature 0.0
