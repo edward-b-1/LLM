@@ -39,7 +39,7 @@ def generate(model, tokenizer, prompt, max_new_tokens, temperature, top_k, devic
     for _ in range(max_new_tokens):
         x_cond = x[:, -context_length:]
 
-        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
             logits, _ = model(x_cond)
 
         logits = logits[:, -1, :]
