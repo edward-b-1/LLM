@@ -26,7 +26,7 @@ class GPT(nn.Module):
             if isinstance(m, (nn.Linear, nn.Embedding)):
                 nn.init.normal_(m.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, loss_mask=None):
         B, T = idx.shape
         assert T <= self.cfg.context_length, f"Sequence length {T} exceeds context_length {self.cfg.context_length}"
 
@@ -41,8 +41,11 @@ class GPT(nn.Module):
 
         loss = None
         if targets is not None:
-            # Shift: predict token t+1 from tokens 0..t
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+            if loss_mask is not None:
+                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), reduction='none')
+                loss = (loss * loss_mask.view(-1)).sum() / loss_mask.sum().clamp(min=1)
+            else:
+                loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
 
         return logits, loss
 
