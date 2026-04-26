@@ -1,4 +1,5 @@
 import os
+import csv
 import glob
 import math
 import argparse
@@ -39,6 +40,7 @@ class TrainConfig:
     eval_steps:     int = 20
     save_interval:  int = 10_000  # save every N steps (0 = save on every eval)
     checkpoint_dir: str = "checkpoints"
+    log_dir:        str = "logs"
     run_name:       str = ""   # prefix for checkpoint filenames; defaults to optimizer name
 
 
@@ -116,6 +118,8 @@ def train(model_cfg=None, train_cfg=None, fresh=False):
     model = GPT(model_cfg).to(device)
     optimizer = get_optimizer(model, train_cfg)
     os.makedirs(train_cfg.checkpoint_dir, exist_ok=True)
+    os.makedirs(train_cfg.log_dir, exist_ok=True)
+    log_path = os.path.join(train_cfg.log_dir, f"{run_name}.csv")
 
     # Resume from latest checkpoint unless --fresh was requested
     step = 1
@@ -132,6 +136,12 @@ def train(model_cfg=None, train_cfg=None, fresh=False):
     print(f"Train tokens: {len(train_ds):,} samples")
     print(f"Starting at : step {step}")
     print("-" * 60)
+
+    log_mode = "a" if not fresh and os.path.exists(log_path) else "w"
+    log_file = open(log_path, log_mode, newline="")
+    log_writer = csv.writer(log_file)
+    if log_mode == "w":
+        log_writer.writerow(["step", "train_loss", "val_loss", "lr"])
 
     loader_iter = iter(train_loader)
 
@@ -164,9 +174,15 @@ def train(model_cfg=None, train_cfg=None, fresh=False):
         is_save_step = train_cfg.save_interval > 0 and step % train_cfg.save_interval == 0
         is_last_step = step == train_cfg.max_steps
 
+        val_loss = None
         if is_eval_step or is_last_step:
             val_loss = evaluate(model, val_loader, train_cfg.eval_steps, device)
             print(f"{'':>8} | val loss   {val_loss:.4f}  ← step {step}")
+
+        log_writer.writerow([step, f"{loss.item():.4f}",
+                             f"{val_loss:.4f}" if val_loss is not None else "",
+                             f"{lr:.2e}"])
+        log_file.flush()
 
         should_save = is_last_step or is_save_step
         if should_save:
@@ -183,6 +199,7 @@ def train(model_cfg=None, train_cfg=None, fresh=False):
 
         step += 1
 
+    log_file.close()
     print("-" * 60)
     print("Training complete.")
 
