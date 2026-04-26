@@ -32,7 +32,7 @@ def prepare():
     all_tokens = array.array('H')
 
     # Generator streams one article at a time — avoids loading all text into RAM upfront
-    article_texts = (article["text"] for article in ds)
+    article_texts = (f"{article['title']}\n\n{article['text']}" for article in ds)
 
     with mp.Pool(processes=N_WORKERS, initializer=_init_worker) as pool:
         for i, ids in enumerate(pool.imap(_tokenize_article, article_texts, chunksize=CHUNK_SIZE)):

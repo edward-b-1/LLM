@@ -25,7 +25,7 @@ def prepare():
     with open(tmp_path, 'wb') as f:
         for i, article in enumerate(ds):
             ids = tokenizer(
-                article["text"],
+                f"{article['title']}\n\n{article['text']}",
                 return_attention_mask=False,
                 truncation=False,
             )["input_ids"]
