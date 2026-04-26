@@ -7,6 +7,7 @@ from data.prepare import get_tokenizer
 from config import ModelConfig
 from model.gpt import GPT
 from train import TrainConfig  # required to unpickle checkpoints
+from sft import SFTConfig      # required to unpickle SFT checkpoints
 
 
 def find_latest_checkpoint(checkpoint_dir, optimizer=None):
@@ -33,6 +34,8 @@ def generate(model, tokenizer, prompt, max_new_tokens, temperature, top_k, devic
     x = torch.tensor(tokens, dtype=torch.long, device=device).unsqueeze(0)
     context_length = model.cfg.context_length
 
+    eos_token_id = tokenizer.eos_token_id
+
     for _ in range(max_new_tokens):
         x_cond = x[:, -context_length:]
 
@@ -50,7 +53,11 @@ def generate(model, tokenizer, prompt, max_new_tokens, temperature, top_k, devic
                 logits[logits < top_values[:, -1:]] = float('-inf')
             probs = torch.softmax(logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
+
         x = torch.cat([x, next_token], dim=1)
+
+        if next_token.item() == eos_token_id:
+            break
 
     return tokenizer.decode(x[0].tolist())
 
