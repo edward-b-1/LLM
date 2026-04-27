@@ -7,7 +7,7 @@ from data.prepare import get_tokenizer
 from config import ModelConfig
 from model.gpt import GPT
 from train import TrainConfig  # required to unpickle checkpoints
-from sft import SFTConfig      # required to unpickle SFT checkpoints
+from configs import SFTConfig  # required to unpickle SFT checkpoints
 
 
 def find_latest_checkpoint(checkpoint_dir, optimizer=None):
