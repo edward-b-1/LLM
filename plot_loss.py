@@ -15,7 +15,7 @@ def main():
                         help="Only plot val loss")
     args = parser.parse_args()
 
-    fig, ax = plt.subplots(figsize=(10, 5))
+    fig, ax = plt.subplots()
 
     for run_name in args.run_names:
         path = os.path.join(args.log_dir, f"{run_name}.csv")
@@ -28,8 +28,17 @@ def main():
         val   = df[df["val_loss"].notna()   & (df["val_loss"]   != "")]
 
         if not args.no_train:
-            ax.plot(train["step"], train["train_loss"].astype(float),
-                    label=f"{run_name} train", alpha=0.7)
+            loss = train["train_loss"].astype(float)
+            steps = train["step"]
+            bin_width = max(1, int(steps.max()) // 50)
+            bin_edges = range(0, int(steps.max()) + bin_width + 1, bin_width)
+            bins = pd.cut(steps, bins=bin_edges, include_lowest=True)
+            mean  = loss.groupby(bins).mean()
+            lo    = loss.groupby(bins).quantile(0.05)
+            hi    = loss.groupby(bins).quantile(0.95)
+            midpoints = mean.index.map(lambda b: b.mid)
+            ax.plot(midpoints, mean.values, label=f"{run_name} train")
+            ax.fill_between(midpoints, lo.values, hi.values, alpha=0.2)
         if not args.no_val:
             ax.plot(val["step"], val["val_loss"].astype(float),
                     label=f"{run_name} val", linewidth=2)
@@ -37,7 +46,7 @@ def main():
     ax.set_xlabel("Step")
     ax.set_ylabel("Loss")
     ax.legend()
-    ax.grid(True, alpha=0.3)
+    #ax.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.show()
 
