@@ -11,6 +11,7 @@ from config import ModelConfig
 from model.gpt import GPT
 from data.dataset import TokenDataset
 from data.registry import DATASETS
+from configs import SFTConfig  # required to unpickle SFT checkpoints
 
 
 @dataclass
@@ -94,7 +95,7 @@ def evaluate(model, val_loader, eval_steps, device):
     return sum(losses) / len(losses)
 
 
-def train(model_cfg=None, train_cfg=None, fresh=False):
+def train(model_cfg=None, train_cfg=None, fresh=False, pretrained=None):
     model_cfg = model_cfg or ModelConfig()
     train_cfg = train_cfg or TrainConfig()
 
@@ -128,6 +129,10 @@ def train(model_cfg=None, train_cfg=None, fresh=False):
         ckpt_path = find_latest_checkpoint(train_cfg.checkpoint_dir, run_name)
         if ckpt_path:
             step = load_checkpoint(ckpt_path, model, optimizer)
+        elif pretrained:
+            print(f"Loading pretrained weights from {pretrained}")
+            ckpt = torch.load(pretrained, weights_only=False)
+            model.load_state_dict(ckpt["model"])
         else:
             print("No checkpoint found — starting from scratch.")
     else:
@@ -210,6 +215,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--fresh",      action="store_true",
                         help="Ignore existing checkpoints and train from scratch")
+    parser.add_argument("--pretrained", type=str, default=None,
+                        help="Path to checkpoint to load weights from as starting point")
     parser.add_argument("--dataset",    type=str,   default=None,
                         choices=list(DATASETS.keys()),
                         help="Dataset to train on (default: shakespeare)")
@@ -252,4 +259,4 @@ if __name__ == "__main__":
     if args.save_interval is not None:
         train_cfg.save_interval = args.save_interval
 
-    train(train_cfg=train_cfg, fresh=args.fresh)
+    train(train_cfg=train_cfg, fresh=args.fresh, pretrained=args.pretrained)
