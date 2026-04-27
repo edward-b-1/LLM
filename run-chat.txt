@@ -1,0 +1,1 @@
+python chat.py --checkpoint checkpoints/adamw-wikipedia-gpt2s_step150000-sft-squad_step10000.pt --temperature 0.0
