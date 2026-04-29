@@ -1,5 +1,6 @@
 import torch.nn as nn
 import torch.nn.functional as F
+from .rope import RoPE
 
 
 class CausalSelfAttention(nn.Module):
@@ -13,6 +14,7 @@ class CausalSelfAttention(nn.Module):
         self.qkv = nn.Linear(cfg.d_model, 3 * cfg.d_model, bias=False)
         self.out_proj = nn.Linear(cfg.d_model, cfg.d_model, bias=False)
         self.dropout = cfg.dropout
+        self.rope = RoPE(self.head_dim, cfg.context_length)
 
     def forward(self, x):
         B, T, C = x.shape
@@ -24,6 +26,7 @@ class CausalSelfAttention(nn.Module):
             return t.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
 
         q, k, v = to_heads(q), to_heads(k), to_heads(v)
+        q, k = self.rope(q), self.rope(k)
 
         # is_causal=True applies the causal mask without materialising an N×N matrix
         # PyTorch dispatches to Flash Attention kernels here when available

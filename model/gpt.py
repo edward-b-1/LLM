@@ -9,7 +9,6 @@ class GPT(nn.Module):
         super().__init__()
         self.cfg = cfg
         self.tok_emb = nn.Embedding(cfg.vocab_size, cfg.d_model)
-        self.pos_emb = nn.Embedding(cfg.context_length, cfg.d_model)
         self.drop = nn.Dropout(cfg.dropout)
         self.blocks = nn.ModuleList([TransformerBlock(cfg) for _ in range(cfg.n_layers)])
         self.ln_f = nn.LayerNorm(cfg.d_model)
@@ -30,8 +29,7 @@ class GPT(nn.Module):
         B, T = idx.shape
         assert T <= self.cfg.context_length, f"Sequence length {T} exceeds context_length {self.cfg.context_length}"
 
-        positions = torch.arange(T, device=idx.device)
-        x = self.drop(self.tok_emb(idx) + self.pos_emb(positions))
+        x = self.drop(self.tok_emb(idx))
 
         for block in self.blocks:
             x = block(x)
