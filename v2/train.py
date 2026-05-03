@@ -1,0 +1,298 @@
+import os
+import csv
+import glob
+import math
+import argparse
+import torch
+from torch.utils.data import DataLoader
+
+from config import ModelConfig
+from model.gpt import GPT
+from data.dataset import TokenDataset
+from data.registry import DATASETS
+from configs import TrainConfig, SFTConfig  # SFTConfig required to unpickle SFT checkpoints
+
+
+def get_optimizer(model, cfg):
+    if cfg.optimizer == "sgd":
+        return torch.optim.SGD(model.parameters(), lr=cfg.lr)
+    elif cfg.optimizer == "sgd-momentum":
+        return torch.optim.SGD(model.parameters(), lr=cfg.lr, momentum=cfg.momentum)
+    elif cfg.optimizer == "adamw":
+        return torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    else:
+        raise ValueError(f"Unknown optimizer: {cfg.optimizer}")
+
+
+def get_lr(step, cfg):
+    if step < cfg.warmup_steps:
+        return cfg.lr * step / max(1, cfg.warmup_steps)
+    progress = (step - cfg.warmup_steps) / max(1, cfg.max_steps - cfg.warmup_steps)
+    return cfg.lr_min + 0.5 * (cfg.lr - cfg.lr_min) * (1 + math.cos(math.pi * progress))
+
+
+def find_latest_checkpoint(checkpoint_dir, run_name):
+    pattern = os.path.join(checkpoint_dir, f"{run_name}_step*.pt")
+    candidates = glob.glob(pattern)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: int(p.split("step")[-1].replace(".pt", "")))
+
+
+def _ckpt_step(path):
+    return int(os.path.basename(path).split("step")[-1].replace(".pt", ""))
+
+
+def populate_permanent_steps(checkpoint_dir, run_name, save_interval, max_steps):
+    """Reconstruct permanent_steps from existing checkpoint files (needed on resume)."""
+    pattern = os.path.join(checkpoint_dir, f"{run_name}_step*.pt")
+    permanent = set()
+    for path in glob.glob(pattern):
+        s = _ckpt_step(path)
+        if (save_interval > 0 and s % save_interval == 0) or s == max_steps:
+            permanent.add(s)
+    return permanent
+
+
+def cleanup_rolling_checkpoints(checkpoint_dir, run_name, current_step, permanent_steps):
+    pattern = os.path.join(checkpoint_dir, f"{run_name}_step*.pt")
+    for path in glob.glob(pattern):
+        s = _ckpt_step(path)
+        if s != current_step and s not in permanent_steps:
+            stale_path = path + ".stale"
+            os.rename(path, stale_path)
+            print(f"{'':>8} | stale      {stale_path}")
+
+
+def load_checkpoint(path, model, optimizer):
+    print(f"Resuming from {path}")
+    ckpt = torch.load(path, weights_only=False)
+    state_dict = ckpt["model"]
+    if any(k.startswith("_orig_mod.") for k in state_dict):
+        state_dict = {k.removeprefix("_orig_mod."): v for k, v in state_dict.items()}
+    model.load_state_dict(state_dict)
+    optimizer.load_state_dict(ckpt["optimizer"])
+    return ckpt["step"] + 1
+
+
+@torch.no_grad()
+def evaluate(model, val_loader, eval_steps, device):
+    model.eval()
+    losses = []
+    for i, (x, y) in enumerate(val_loader):
+        if i >= eval_steps:
+            break
+        x, y = x.to(device), y.to(device)
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+            _, loss = model(x, y)
+        losses.append(loss.item())
+    model.train()
+    return sum(losses) / len(losses)
+
+
+def train(model_cfg=None, train_cfg=None, fresh=False, pretrained=None):
+    model_cfg = model_cfg or ModelConfig()
+    train_cfg = train_cfg or TrainConfig()
+
+    run_name = train_cfg.run_name or train_cfg.optimizer
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device    : {device}")
+    print(f"Run       : {run_name}")
+    print(f"Optimizer : {train_cfg.optimizer}  lr={train_cfg.lr}")
+    print(f"Model     : {model_cfg.n_layers}L  d={model_cfg.d_model}  heads={model_cfg.n_heads}")
+
+    # Data
+    train_ds = TokenDataset(train_cfg.train_path, model_cfg.context_length)
+    val_ds   = TokenDataset(train_cfg.val_path,   model_cfg.context_length)
+
+    train_loader = DataLoader(train_ds, batch_size=train_cfg.batch_size,
+                              shuffle=True, num_workers=4, pin_memory=True)
+    val_loader   = DataLoader(val_ds,   batch_size=train_cfg.batch_size,
+                              shuffle=False, num_workers=2, pin_memory=True)
+
+    # Model & optimizer
+    model = GPT(model_cfg).to(device)
+    optimizer = get_optimizer(model, train_cfg)
+    os.makedirs(train_cfg.checkpoint_dir, exist_ok=True)
+    os.makedirs(train_cfg.log_dir, exist_ok=True)
+    log_path = os.path.join(train_cfg.log_dir, f"{run_name}.csv")
+
+    # Resume from latest checkpoint unless --fresh was requested
+    step = 1
+    if not fresh:
+        ckpt_path = find_latest_checkpoint(train_cfg.checkpoint_dir, run_name)
+        if ckpt_path:
+            step = load_checkpoint(ckpt_path, model, optimizer)
+        elif pretrained:
+            print(f"Loading pretrained weights from {pretrained}")
+            ckpt = torch.load(pretrained, weights_only=False)
+            model.load_state_dict(ckpt["model"])
+        else:
+            print("No checkpoint found — starting from scratch.")
+    else:
+        print("--fresh specified — starting from scratch.")
+
+    model = torch.compile(model)
+
+    print(f"Parameters  : {model.num_params():,}")
+    print(f"Train tokens: {len(train_ds):,} samples")
+    print(f"Starting at : step {step}")
+    print("-" * 60)
+
+    log_mode = "a" if not fresh and os.path.exists(log_path) else "w"
+    log_file = open(log_path, log_mode, newline="")
+    log_writer = csv.writer(log_file)
+    if log_mode == "w":
+        log_writer.writerow(["step", "train_loss", "val_loss", "lr"])
+
+    permanent_steps = populate_permanent_steps(
+        train_cfg.checkpoint_dir, run_name,
+        train_cfg.save_interval, train_cfg.max_steps,
+    )
+    loader_iter = iter(train_loader)
+
+    while step <= train_cfg.max_steps:
+        lr = get_lr(step, train_cfg)
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+
+        optimizer.zero_grad()
+        accum_loss = 0.0
+        for _ in range(train_cfg.grad_accum_steps):
+            try:
+                x, y = next(loader_iter)
+            except StopIteration:
+                loader_iter = iter(train_loader)
+                x, y = next(loader_iter)
+            x, y = x.to(device), y.to(device)
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                _, loss = model(x, y)
+            (loss / train_cfg.grad_accum_steps).backward()
+            accum_loss += loss.item() / train_cfg.grad_accum_steps
+
+        if train_cfg.grad_clip > 0.0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip)
+        optimizer.step()
+
+        if step % train_cfg.log_interval == 0:
+            if torch.cuda.is_available():
+                reserved = torch.cuda.memory_reserved() / 1024**3
+                vram_str = f"  vram {reserved:.2f}GB"
+            else:
+                vram_str = ""
+            print(f"step {step:5d} | train loss {accum_loss:.4f}  lr {lr:.2e}{vram_str}")
+
+        is_eval_step    = step % train_cfg.eval_interval == 0
+        is_save_step    = train_cfg.save_interval > 0 and step % train_cfg.save_interval == 0
+        is_rolling_step = train_cfg.rolling_interval > 0 and step % train_cfg.rolling_interval == 0
+        is_last_step    = step == train_cfg.max_steps
+
+        val_loss = None
+        if is_eval_step or is_last_step:
+            val_loss = evaluate(model, val_loader, train_cfg.eval_steps, device)
+            print(f"{'':>8} | val loss   {val_loss:.4f}  ← step {step}")
+
+        log_writer.writerow([step, f"{accum_loss:.4f}",
+                             f"{val_loss:.4f}" if val_loss is not None else "",
+                             f"{lr:.2e}"])
+        log_file.flush()
+
+        is_permanent = is_last_step or is_save_step
+        if is_permanent or is_rolling_step:
+            path = os.path.join(train_cfg.checkpoint_dir,
+                                f"{run_name}_step{step}.pt")
+            torch.save({
+                "step":      step,
+                "model":     model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "train_cfg": train_cfg,
+                "model_cfg": model_cfg,
+            }, path)
+            if is_permanent:
+                permanent_steps.add(step)
+                print(f"{'':>8} | checkpoint {path}")
+            else:
+                print(f"{'':>8} | rolling    {path}")
+                cleanup_rolling_checkpoints(
+                    train_cfg.checkpoint_dir, run_name, step, permanent_steps
+                )
+
+        step += 1
+
+    log_file.close()
+    print("-" * 60)
+    if torch.cuda.is_available():
+        peak_alloc    = torch.cuda.max_memory_allocated()  / 1024**3
+        peak_reserved = torch.cuda.max_memory_reserved()   / 1024**3
+        free, total   = torch.cuda.mem_get_info()
+        free_gb       = free  / 1024**3
+        total_gb      = total / 1024**3
+        print(f"Peak allocated : {peak_alloc:.2f} GB")
+        print(f"Peak reserved  : {peak_reserved:.2f} GB")
+        print(f"Free at end    : {free_gb:.2f} GB / {total_gb:.2f} GB")
+    print("Training complete.")
+
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--fresh",      action="store_true",
+                        help="Ignore existing checkpoints and train from scratch")
+    parser.add_argument("--pretrained", type=str, default=None,
+                        help="Path to checkpoint to load weights from as starting point")
+    parser.add_argument("--dataset",    type=str,   default=None,
+                        choices=list(DATASETS.keys()),
+                        help="Dataset to train on (default: shakespeare)")
+    parser.add_argument("--optimizer",  type=str,   default=None,
+                        choices=["sgd", "sgd-momentum", "adamw"],
+                        help="Optimizer to use (default: from TrainConfig)")
+    parser.add_argument("--max-steps",  type=int,   default=None,
+                        help="Number of training steps (default: from TrainConfig)")
+    parser.add_argument("--lr",         type=float, default=None,
+                        help="Learning rate (default: from TrainConfig)")
+    parser.add_argument("--grad-clip",    type=float, default=None,
+                        help="Gradient clipping max norm, 0 to disable (default: 1.0)")
+    parser.add_argument("--lr-min",       type=float, default=None,
+                        help="Final LR after cosine decay (default: 0.0)")
+    parser.add_argument("--warmup-steps", type=int,   default=None,
+                        help="Linear LR warmup steps (default: 1000)")
+    parser.add_argument("--run-name",      type=str,   default=None,
+                        help="Checkpoint filename prefix (default: optimizer name)")
+    parser.add_argument("--save-interval",    type=int,   default=None,
+                        help="Permanent checkpoint every N steps; all versions kept (default: 10000)")
+    parser.add_argument("--rolling-interval", type=int,   default=None,
+                        help="Rolling checkpoint every N steps; only latest kept (0 = disabled)")
+    parser.add_argument("--grad-accum-steps", type=int,   default=None,
+                        help="Gradient accumulation steps (effective batch = batch_size * this)")
+    parser.add_argument("--batch-size",       type=int,   default=None,
+                        help="Micro-batch size per accumulation step (default: 1)")
+    args = parser.parse_args()
+
+    train_cfg = TrainConfig()
+    if args.dataset is not None:
+        train_cfg.train_path, train_cfg.val_path = DATASETS[args.dataset]
+    if args.optimizer is not None:
+        train_cfg.optimizer = args.optimizer
+    if args.max_steps is not None:
+        train_cfg.max_steps = args.max_steps
+    if args.lr is not None:
+        train_cfg.lr = args.lr
+    if args.grad_clip is not None:
+        train_cfg.grad_clip = args.grad_clip
+    if args.lr_min is not None:
+        train_cfg.lr_min = args.lr_min
+    if args.warmup_steps is not None:
+        train_cfg.warmup_steps = args.warmup_steps
+    if args.run_name is not None:
+        train_cfg.run_name = args.run_name
+    if args.save_interval is not None:
+        train_cfg.save_interval = args.save_interval
+    if args.rolling_interval is not None:
+        train_cfg.rolling_interval = args.rolling_interval
+    if args.grad_accum_steps is not None:
+        train_cfg.grad_accum_steps = args.grad_accum_steps
+    if args.batch_size is not None:
+        train_cfg.batch_size = args.batch_size
+
+    train(train_cfg=train_cfg, fresh=args.fresh, pretrained=args.pretrained)
