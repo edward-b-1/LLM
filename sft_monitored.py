@@ -65,7 +65,7 @@ def train(sft_cfg=None, pretrained_checkpoint=None, fresh=False):
                                  shuffle=False, num_workers=2, pin_memory=True)
 
     model_cfg = ModelConfig()
-    model     = GPT(model_cfg).to(device)
+    model     = torch.compile(GPT(model_cfg).to(device))
     optimizer = torch.optim.AdamW(model.parameters(),
                                   lr=sft_cfg.lr, weight_decay=sft_cfg.weight_decay)
 

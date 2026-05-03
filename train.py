@@ -37,13 +37,14 @@ class TrainConfig:
     grad_clip:  float = 1.0    # set to 0.0 to disable
 
     # Logging & checkpointing
-    log_interval:   int = 10
-    eval_interval:  int = 250
-    eval_steps:     int = 20
-    save_interval:  int = 10_000  # save every N steps (0 = save on every eval)
-    checkpoint_dir: str = "checkpoints"
-    log_dir:        str = "logs"
-    run_name:       str = ""   # prefix for checkpoint filenames; defaults to optimizer name
+    log_interval:     int = 10
+    eval_interval:    int = 250
+    eval_steps:       int = 20
+    save_interval:    int = 10_000  # permanent checkpoint every N steps; all versions kept
+    rolling_interval: int = 0       # rolling checkpoint every N steps; only latest kept (0 = disabled)
+    checkpoint_dir:   str = "checkpoints"
+    log_dir:          str = "logs"
+    run_name:         str = ""   # prefix for checkpoint filenames; defaults to optimizer name
 
 
 def get_optimizer(model, cfg):
@@ -64,12 +65,37 @@ def get_lr(step, cfg):
     return cfg.lr_min + 0.5 * (cfg.lr - cfg.lr_min) * (1 + math.cos(math.pi * progress))
 
 
-def find_latest_checkpoint(checkpoint_dir, optimizer):
-    pattern = os.path.join(checkpoint_dir, f"{optimizer}_step*.pt")
+def find_latest_checkpoint(checkpoint_dir, run_name):
+    pattern = os.path.join(checkpoint_dir, f"{run_name}_step*.pt")
     candidates = glob.glob(pattern)
     if not candidates:
         return None
     return max(candidates, key=lambda p: int(p.split("step")[-1].replace(".pt", "")))
+
+
+def _ckpt_step(path):
+    return int(os.path.basename(path).split("step")[-1].replace(".pt", ""))
+
+
+def populate_permanent_steps(checkpoint_dir, run_name, save_interval, max_steps):
+    """Reconstruct permanent_steps from existing checkpoint files (needed on resume)."""
+    pattern = os.path.join(checkpoint_dir, f"{run_name}_step*.pt")
+    permanent = set()
+    for path in glob.glob(pattern):
+        s = _ckpt_step(path)
+        if (save_interval > 0 and s % save_interval == 0) or s == max_steps:
+            permanent.add(s)
+    return permanent
+
+
+def cleanup_rolling_checkpoints(checkpoint_dir, run_name, current_step, permanent_steps):
+    pattern = os.path.join(checkpoint_dir, f"{run_name}_step*.pt")
+    for path in glob.glob(pattern):
+        s = _ckpt_step(path)
+        if s != current_step and s not in permanent_steps:
+            stale_path = path + ".stale"
+            os.rename(path, stale_path)
+            print(f"{'':>8} | stale      {stale_path}")
 
 
 def load_checkpoint(path, model, optimizer):
@@ -117,7 +143,7 @@ def train(model_cfg=None, train_cfg=None, fresh=False, pretrained=None):
                               shuffle=False, num_workers=2, pin_memory=True)
 
     # Model & optimizer
-    model = GPT(model_cfg).to(device)
+    model = torch.compile(GPT(model_cfg).to(device))
     optimizer = get_optimizer(model, train_cfg)
     os.makedirs(train_cfg.checkpoint_dir, exist_ok=True)
     os.makedirs(train_cfg.log_dir, exist_ok=True)
@@ -149,6 +175,10 @@ def train(model_cfg=None, train_cfg=None, fresh=False, pretrained=None):
     if log_mode == "w":
         log_writer.writerow(["step", "train_loss", "val_loss", "lr"])
 
+    permanent_steps = populate_permanent_steps(
+        train_cfg.checkpoint_dir, run_name,
+        train_cfg.save_interval, train_cfg.max_steps,
+    )
     loader_iter = iter(train_loader)
 
     while step <= train_cfg.max_steps:
@@ -176,9 +206,10 @@ def train(model_cfg=None, train_cfg=None, fresh=False, pretrained=None):
         if step % train_cfg.log_interval == 0:
             print(f"step {step:5d} | train loss {loss.item():.4f}  lr {lr:.2e}")
 
-        is_eval_step = step % train_cfg.eval_interval == 0
-        is_save_step = train_cfg.save_interval > 0 and step % train_cfg.save_interval == 0
-        is_last_step = step == train_cfg.max_steps
+        is_eval_step    = step % train_cfg.eval_interval == 0
+        is_save_step    = train_cfg.save_interval > 0 and step % train_cfg.save_interval == 0
+        is_rolling_step = train_cfg.rolling_interval > 0 and step % train_cfg.rolling_interval == 0
+        is_last_step    = step == train_cfg.max_steps
 
         val_loss = None
         if is_eval_step or is_last_step:
@@ -190,8 +221,8 @@ def train(model_cfg=None, train_cfg=None, fresh=False, pretrained=None):
                              f"{lr:.2e}"])
         log_file.flush()
 
-        should_save = is_last_step or is_save_step
-        if should_save:
+        is_permanent = is_last_step or is_save_step
+        if is_permanent or is_rolling_step:
             path = os.path.join(train_cfg.checkpoint_dir,
                                 f"{run_name}_step{step}.pt")
             torch.save({
@@ -201,7 +232,14 @@ def train(model_cfg=None, train_cfg=None, fresh=False, pretrained=None):
                 "train_cfg": train_cfg,
                 "model_cfg": model_cfg,
             }, path)
-            print(f"{'':>8} | saved {path}")
+            if is_permanent:
+                permanent_steps.add(step)
+                print(f"{'':>8} | checkpoint {path}")
+            else:
+                print(f"{'':>8} | rolling    {path}")
+                cleanup_rolling_checkpoints(
+                    train_cfg.checkpoint_dir, run_name, step, permanent_steps
+                )
 
         step += 1
 
@@ -235,8 +273,10 @@ if __name__ == "__main__":
                         help="Linear LR warmup steps (default: 1000)")
     parser.add_argument("--run-name",      type=str,   default=None,
                         help="Checkpoint filename prefix (default: optimizer name)")
-    parser.add_argument("--save-interval", type=int,   default=None,
-                        help="Save checkpoint every N steps independent of eval (default: only on eval)")
+    parser.add_argument("--save-interval",    type=int,   default=None,
+                        help="Permanent checkpoint every N steps; all versions kept (default: 10000)")
+    parser.add_argument("--rolling-interval", type=int,   default=None,
+                        help="Rolling checkpoint every N steps; only latest kept (0 = disabled)")
     args = parser.parse_args()
 
     train_cfg = TrainConfig()
@@ -258,5 +298,7 @@ if __name__ == "__main__":
         train_cfg.run_name = args.run_name
     if args.save_interval is not None:
         train_cfg.save_interval = args.save_interval
+    if args.rolling_interval is not None:
+        train_cfg.rolling_interval = args.rolling_interval
 
     train(train_cfg=train_cfg, fresh=args.fresh, pretrained=args.pretrained)
