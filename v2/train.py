@@ -59,9 +59,8 @@ def cleanup_rolling_checkpoints(checkpoint_dir, run_name, current_step, permanen
     for path in glob.glob(pattern):
         s = _ckpt_step(path)
         if s != current_step and s not in permanent_steps:
-            stale_path = path + ".stale"
-            os.rename(path, stale_path)
-            print(f"{'':>8} | stale      {stale_path}")
+            os.remove(path)
+            print(f"{'':>8} | removed    {path}")
 
 
 def load_checkpoint(path, model, optimizer):

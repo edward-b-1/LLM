@@ -25,9 +25,11 @@ def main():
     parser.add_argument("--max-new-tokens", type=int,   default=200)
     parser.add_argument("--temperature",    type=float, default=0.8)
     parser.add_argument("--top-k",          type=int,   default=50)
+    parser.add_argument("--cpu",            action="store_true",
+                        help="Force CPU inference")
     args = parser.parse_args()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cpu" if args.cpu else "cuda" if torch.cuda.is_available() else "cpu")
 
     if args.checkpoint:
         ckpt_path = args.checkpoint
